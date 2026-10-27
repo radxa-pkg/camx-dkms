@@ -1,0 +1,12 @@
+EXTRA_DH_OPTIONS += --with dkms
+override_dh_auto_build:
+	@true
+
+override_dh_install:
+	mkdir -p debian/camx-dkms-qcs6490/usr/src/camx-dkms-qcs6490-$(DKMS_VERSION)
+	tar -C src --exclude=.git --exclude=.github --exclude=.gitattributes -cf - . | \
+		tar -C debian/camx-dkms-qcs6490/usr/src/camx-dkms-qcs6490-$(DKMS_VERSION) -xf -
+	printf '%s\n' '#define CAMERA_COMPILE_TIME "DKMS build"' \
+		'#define CAMERA_COMPILE_HOST "dkms"' \
+		'#define CAMERA_CC_VERSION "dkms-gcc"' \
+		> debian/camx-dkms-qcs6490/usr/src/camx-dkms-qcs6490-$(DKMS_VERSION)/cam_generated_h

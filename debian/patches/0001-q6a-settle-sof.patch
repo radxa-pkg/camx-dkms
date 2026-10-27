@@ -1,0 +1,329 @@
+Description: Q6A camera driver fixes (settle, lane_assign, SOF/EOF, CSIPHY handle, combo_mode, CSID clk floor)
+ Radxa Q6A adaptations for camera-driver v1.0.5, taken verbatim from the Yocto
+ recipe meta-qcom/recipes-multimedia/camx/camx-dlkm/camx-dlkm-q6a-settle-sof.patch
+ (md5 3a7aadda5e8a2875ed41dae68a98a790).
+ .
+ NOT applied by default - see debian/patches/series.  Measured 2026-09-30 on Q6A
+ with IMX577: with this patch applied the preview delivers zero frames at a CSID
+ floor of either 400 MHz or 600 MHz (ISP stalls in Substate[BUBBLE], CamX reports
+ ParseHangRegDump / errorCode 257), while the unpatched driver runs 1920x1080@30
+ NV12 at 29.78 fps with dropped:0 and FIFO_OVERFLOW:0.  Details in
+ docs/camx-service-packaging.md section 10.6.
+Author: Chongbiao Chen <chenchongbiao@radxa.com>
+Forwarded: not-needed
+Last-Update: 2026-09-30
+
+From: Chongbiao Chen <chenchongbiao@radxa.com>
+Subject: [PATCH] camx-dlkm: Q6A fixes from camx-dlkm-q6a-fixes.patch + CSID 600MHz
+
+Includes previously working Q6A patch (settle, lane_assign, SOF/EOF,
+keep CSIPHY handle, combo_mode) plus CSID clk floor 600MHz.
+
+Upstream-Status: Pending
+Signed-off-by: Chongbiao Chen <chenchongbiao@radxa.com>
+
+diff --git a/src/camera_kt/drivers/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c b/src/camera_kt/drivers/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c
+index d865c1c..7d6ee2f 100644
+--- a/src/camera_kt/drivers/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c
++++ b/src/camera_kt/drivers/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c
+@@ -1492,6 +1492,9 @@ static int cam_ife_csid_enable_hw(struct cam_ife_csid_hw  *csid_hw)
+ 	CAM_DBG(CAM_ISP, "CSID:%d init CSID HW",
+ 		csid_hw->hw_intf->hw_idx);
+ 
++	if (csid_hw->clk_rate < 400000000ULL)
++		csid_hw->clk_rate = 400000000ULL;
++
+ 	rc = cam_soc_util_get_clk_level(soc_info, csid_hw->clk_rate,
+ 		soc_info->src_clk_idx, &clk_lvl);
+ 	if (rc) {
+@@ -3126,11 +3129,13 @@ static int cam_ife_csid_enable_rdi_path(
+ 	if (csid_reg->rdi_reg[id]->overflow_ctrl_en)
+ 		val |= CSID_PATH_OVERFLOW_RECOVERY;
+ 
+-	if (csid_hw->csid_debug & CSID_DEBUG_ENABLE_SOF_IRQ)
+-		val |= CSID_PATH_INFO_INPUT_SOF;
+-
+-	if (csid_hw->csid_debug & CSID_DEBUG_ENABLE_EOF_IRQ)
+-		val |= CSID_PATH_INFO_INPUT_EOF;
++	/*
++	 * Q6A compat: camx UMD SET_DEBUG 传 csid_debug=0，SOF/EOF 是 RDI 正常工作的
++	 * 必需事件（camx pipeline isSofdispatched 依赖 SOF IRQ），不应被 debug 位门控。
++	 * 否则 camx 报 "Hit SOF threshold of [17] consecutive frames with invalidrequestId"
++	 * -> IFE hang -> request 超时。无条件使能。
++	 */
++	val |= CSID_PATH_INFO_INPUT_SOF | CSID_PATH_INFO_INPUT_EOF;
+ 
+ 	val |= (CSID_PATH_ERROR_PIX_COUNT |
+ 		CSID_PATH_ERROR_LINE_COUNT);
+@@ -4392,6 +4397,16 @@ static int cam_ife_csid_set_csid_clock(
+ 		(struct cam_ife_csid_clock_update_args *)cmd_args;
+ 
+ 	csid_hw->clk_rate = clk_update->clk_rate;
++	/*
++	 * Q6A: CAM1 4-lane @ 996Mbps overflows CSID at lowsvs (300MHz).
++	 * UMD often votes 90MHz which maps to the first DT rate (300MHz).
++	 * Floor to 400MHz (PLL0_EVEN / 1).
++	 */
++	if (csid_hw->clk_rate < 400000000ULL) {
++		pr_err("CAM-CSID-DBG: clk_rate %llu too low, bump to 400000000\n",
++			csid_hw->clk_rate);
++		csid_hw->clk_rate = 400000000ULL;
++	}
+ 	CAM_INFO(CAM_ISP, "CSID clock rate %llu", csid_hw->clk_rate);
+ 
+ 	return 0;
+diff --git a/src/camera_kt/drivers/cam_sensor_module/cam_csiphy/cam_csiphy_core.c b/src/camera_kt/drivers/cam_sensor_module/cam_csiphy/cam_csiphy_core.c
+index 3ce1e2c..1bb2320 100644
+--- a/src/camera_kt/drivers/cam_sensor_module/cam_csiphy/cam_csiphy_core.c
++++ b/src/camera_kt/drivers/cam_sensor_module/cam_csiphy/cam_csiphy_core.c
+@@ -68,6 +68,9 @@ static int32_t cam_csiphy_get_instance_offset(
+ 	}
+ 
+ 	for (i = 0; i < csiphy_dev->acquire_count; i++) {
++		pr_err("CAM-CSIPHY-DBG: OFFSET_LOOP i=%d dev_handle=0x%x stored_hdl=0x%x\n",
++			i, dev_handle,
++			csiphy_dev->csiphy_info[i].hdl_data.device_hdl);
+ 		if (dev_handle ==
+ 			csiphy_dev->csiphy_info[i].hdl_data.device_hdl)
+ 			break;
+@@ -433,6 +436,11 @@ static int32_t cam_cmd_buf_parser(struct csiphy_device *csiphy_dev,
+ 
+ 	index = cam_csiphy_get_instance_offset(csiphy_dev, cfg_dev->dev_handle);
+ 	if (index < 0 || index  >= csiphy_dev->session_max_device_support) {
++		pr_err("CAM-CSIPHY-DBG: CFG_FAIL dev_handle=0x%x index=%d acq_cnt=%d session_max=%u lane_cnt=%u lane_assign=0x%x\n",
++			cfg_dev->dev_handle, index, csiphy_dev->acquire_count,
++			csiphy_dev->session_max_device_support,
++			(cam_cmd_csiphy_info ? cam_cmd_csiphy_info->lane_cnt : 0),
++			(cam_cmd_csiphy_info ? cam_cmd_csiphy_info->lane_assign : 0));
+ 		CAM_ERR(CAM_CSIPHY, "index in invalid: %d", index);
+ 		return -EINVAL;
+ 	}
+@@ -459,9 +467,59 @@ static int32_t cam_cmd_buf_parser(struct csiphy_device *csiphy_dev,
+ 	csiphy_dev->csiphy_info[index].mipi_flags =
+ 		cam_cmd_csiphy_info->mipi_flags;
+ 
++	/*
++	 * Q6A compat: camx 1.0.12 UMD may pass a garbage settle_time
++	 * (e.g. 4000000000 ps = 4 s) when the module CSIInfo fails to
++	 * load ("Cannot match sensor: imx214 and module").  IMX214 runs
++	 * at 20 ns settle time (20000 ps); any value > 1 ms is bogus and
++	 * would break the CSIPHY lane timing, so fall back to 20000 ps.
++	 * NOTE: must fix csiphy_dev->csiphy_info[index] (the value the
++	 * CSIPHY config path actually reads), not cam_cmd_csiphy_info.
++	 */
++	if (csiphy_dev->csiphy_info[index].settle_time > 1000000000ULL) {
++		pr_err("CAM-CSIPHY-DBG: invalid settle_time=%llu, fallback to 20000\n",
++			csiphy_dev->csiphy_info[index].settle_time);
++		csiphy_dev->csiphy_info[index].settle_time = 20000ULL;
++	}
++
+ 	lane_assign = csiphy_dev->csiphy_info[index].lane_assign;
+ 	lane_cnt = csiphy_dev->csiphy_info[index].lane_cnt;
+ 
++	/*
++	 * Q6A compat: camx 1.0.12 UMD may pass a garbage lane_assign
++	 * (e.g. 0x4c05) when the module CSIInfo fails to load ("Cannot
++	 * match sensor: imx214 and module").  In mission (non-combo)
++	 * mode fall back to the standard 4-lane DPHY assignment 0x3210
++	 * instead of failing CSIPHY config.  (Radxa Q6A / IMX214)
++	 */
++	if (!csiphy_dev->combo_mode && !csiphy_dev->cphy_dphy_combo_mode) {
++		uint16_t la = lane_assign;
++		bool valid = true;
++		uint8_t n, seen = 0;
++
++		for (n = 0; n < lane_cnt; n++) {
++			uint8_t nib = la & 0xF;
++			if (nib > 0x3) {
++				valid = false;
++				break;
++			}
++			/* duplicate nibble: two data lanes mapped to the same
++			 * physical lane (e.g. 0x0000 from a truncated bin) */
++			if (seen & (1 << nib)) {
++				valid = false;
++				break;
++			}
++			seen |= (1 << nib);
++			la >>= 4;
++		}
++		if (!valid) {
++			pr_err("CAM-CSIPHY-DBG: invalid lane_assign=0x%x, fallback to 0x3210\n",
++				csiphy_dev->csiphy_info[index].lane_assign);
++			lane_assign = 0x3210;
++			csiphy_dev->csiphy_info[index].lane_assign = 0x3210;
++		}
++	}
++
+ 	while (lane_cnt--) {
+ 		rc = cam_csiphy_get_lane_enable(csiphy_dev, index,
+ 			(lane_assign & 0xF), &lane_enable);
+@@ -873,6 +931,31 @@ static int32_t cam_csiphy_config_dev(struct csiphy_device *csiphy_dev,
+ 	intermediate_var = csiphy_dev->csiphy_info[index].settle_time;
+ 	do_div(intermediate_var, 200000000);
+ 	settle_cnt = intermediate_var;
++
++	/*
++	 * Q6A compat: camx UMD passes settle_time in ps (e.g. 20000 ps),
++	 * settle_cnt = 20000/200000000 = 0 -> CSIPHY lane timing invalid
++	 * -> FIFO overflow.  When settle_cnt==0, recompute with the
++	 * mainline camss formula (T_hs_settle from CSI2 link frequency):
++	 *   ui = 1e12 / (2 * link_freq)
++	 *   t_hs_settle = (85000 + 6*ui + 145000 + 10*ui) / 2
++	 *   settle_cnt = t_hs_settle / 5000 - 1   (timer 200MHz)
++	 * 720Mbps -> t_hs_settle=126104ps -> settle_cnt=24.
++	 */
++	if (settle_cnt == 0 && csiphy_dev->csiphy_info[index].data_rate > 0) {
++		uint64_t ui, t_hs_prepare_max, t_hs_prepare_zero_min, t_hs_settle;
++
++		ui = div_u64(1000000000000ULL,
++			csiphy_dev->csiphy_info[index].data_rate);
++		do_div(ui, 2);
++		t_hs_prepare_max = 85000ULL + 6ULL * ui;
++		t_hs_prepare_zero_min = 145000ULL + 10ULL * ui;
++		t_hs_settle = (t_hs_prepare_max + t_hs_prepare_zero_min) / 2;
++		settle_cnt = div_u64(t_hs_settle, 5000ULL) - 1;
++		pr_err("CAM-CSIPHY-DBG: settle_cnt was 0, recomputed to %d (t_hs_settle=%llu ps, lane_rate=%llu)\n",
++			settle_cnt, t_hs_settle,
++			csiphy_dev->csiphy_info[index].data_rate);
++	}
+ 	skew_cal_enable =
+ 		csiphy_dev->csiphy_info[index].mipi_flags & SKEW_CAL_MASK;
+ 
+@@ -964,7 +1047,13 @@ void cam_csiphy_shutdown(struct csiphy_device *csiphy_dev)
+ 			csiphy_dev->csiphy_info[i].secure_mode =
+ 				CAM_SECURE_MODE_NON_SECURE;
+ 
+-			cam_csiphy_reset_phyconfig_param(csiphy_dev, i);
++			/*
++			 * Q6A compat: keep the acquired device handle across
++			 * stop/start. camx 1.0.12 UMD reuses the handle for
++			 * a subsequent CAM_CONFIG_DEV after CAM_STOP_DEV
++			 * without re-acquiring; wiping it here (-1) makes
++			 * get_instance_offset fail with index >= session_max.
++			 */
+ 		}
+ 
+ 		if (csiphy_dev->ctrl_reg->csiphy_reg
+@@ -1154,13 +1243,18 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
+ 		csiphy_acq_params.cphy_dphy_combo_mode = 0;
+ 		csiphy_acq_params.mux_mode = 0;
+ 
+-		if (copy_from_user(&csiphy_acq_params,
++		rc = copy_from_user(&csiphy_acq_params,
+ 			u64_to_user_ptr(csiphy_acq_dev.info_handle),
+-			sizeof(csiphy_acq_params))) {
+-			CAM_ERR(CAM_CSIPHY,
+-				"Failed copying from User");
++			sizeof(csiphy_acq_params));
++		if (rc) {
++			CAM_ERR(CAM_CSIPHY, "Failed copying from User");
+ 			goto release_mutex;
+ 		}
++		pr_err("CAM-CSIPHY-DBG: ACQUIRE dev_handle=0x%x session=0x%x combo=%d cphy=%d mux=%d 3phase=%d acq_cnt=%d state=%d\n",
++			csiphy_acq_dev.device_handle, csiphy_acq_dev.session_handle,
++			csiphy_acq_params.combo_mode, csiphy_acq_params.cphy_dphy_combo_mode,
++			csiphy_acq_params.mux_mode, csiphy_acq_params.csiphy_3phase,
++			csiphy_dev->acquire_count, csiphy_dev->csiphy_state);
+ 
+ 		if (csiphy_acq_params.combo_mode &&
+ 			csiphy_acq_params.cphy_dphy_combo_mode) {
+@@ -1201,9 +1295,17 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
+ 				CSIPHY_MAX_INSTANCES_PER_PHY - 1;
+ 		}
+ 
+-		if (!csiphy_acq_params.combo_mode &&
+-			!csiphy_acq_params.mux_mode &&
+-			!csiphy_acq_params.cphy_dphy_combo_mode) {
++		/*
++		 * Q6A compatibility: camx 1.0.12 UMD fills only combo_mode in
++		 * cam_csiphy_acquire_dev_info; the trailing mux_mode and
++		 * cphy_dphy_combo_mode bytes are uninitialized (garbage).  This
++		 * board is single-sensor DPHY (mission mode) so gate solely on
++		 * combo_mode.  (Radxa Q6A / camera-driver v1.0.5 adaptation)
++		 */
++		csiphy_acq_params.mux_mode = 0;
++		csiphy_acq_params.cphy_dphy_combo_mode = 0;
++
++		if (!csiphy_acq_params.combo_mode) {
+ 			CAM_DBG(CAM_CSIPHY, "Non Combo/Mux Mode stream");
+ 			csiphy_dev->session_max_device_support = 1;
+ 		}
+@@ -1225,6 +1327,9 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
+ 
+ 		csiphy_dev->csiphy_info[index].hdl_data.device_hdl =
+ 			csiphy_acq_dev.device_handle;
++		pr_err("CAM-CSIPHY-DBG: ACQUIRE_DONE index=%d new_dev_handle=0x%x session=0x%x\n",
++			index, csiphy_acq_dev.device_handle,
++			csiphy_acq_dev.session_handle);
+ 		csiphy_dev->csiphy_info[index].hdl_data.session_hdl =
+ 			csiphy_acq_dev.session_handle;
+ 		csiphy_dev->csiphy_info[index].csiphy_3phase =
+@@ -1624,11 +1729,13 @@ int32_t cam_csiphy_core_cfg(void *phy_dev,
+ 		csiphy_dev->csiphy_state = CAM_CSIPHY_START;
+ 
+ 		CAM_INFO(CAM_CSIPHY,
+-			"CAM_START_PHYDEV: CSIPHY_IDX: %d, Device_slot: %d, cp_mode: %d, Datarate: %llu, Settletime: %llu",
++			"CAM_START_PHYDEV: CSIPHY_IDX: %d, Device_slot: %d, cp_mode: %d, Datarate: %llu, Settletime: %llu, lane_cnt: %d, lane_assign: 0x%x",
+ 			csiphy_dev->soc_info.index, offset,
+ 			csiphy_dev->csiphy_info[offset].secure_mode,
+ 			csiphy_dev->csiphy_info[offset].data_rate,
+-			csiphy_dev->csiphy_info[offset].settle_time);
++			csiphy_dev->csiphy_info[offset].settle_time,
++			csiphy_dev->csiphy_info[offset].lane_cnt,
++			csiphy_dev->csiphy_info[offset].lane_assign);
+ 	}
+ 		break;
+ 	case CAM_CONFIG_DEV_EXTERNAL: {
+diff --git a/src/camera_kt/drivers/cam_sensor_module/cam_sensor/cam_sensor_core.c b/src/camera_kt/drivers/cam_sensor_module/cam_sensor/cam_sensor_core.c
+index 8882b70..a3f500a 100644
+--- a/src/camera_kt/drivers/cam_sensor_module/cam_sensor/cam_sensor_core.c
++++ b/src/camera_kt/drivers/cam_sensor_module/cam_sensor/cam_sensor_core.c
+@@ -432,6 +432,25 @@ static int32_t cam_sensor_i2c_modes_util(
+ 
+ 	io_master_info = &s_ctrl->io_master_info;
+ 
++	{
++		uint32_t dbg_n = i2c_list->i2c_settings.size;
++		uint32_t dbg_i;
++		uint32_t pll_seen = 0;
++		for (dbg_i = 0; dbg_i < dbg_n; dbg_i++) {
++			uint32_t a = i2c_list->i2c_settings.reg_setting[dbg_i].reg_addr;
++			pr_err("CAM-SENSOR-DBG: opcode=%d [%u] addr=0x%x data=0x%x\n",
++				i2c_list->op_code, dbg_i, a,
++				i2c_list->i2c_settings.reg_setting[dbg_i].reg_data);
++			if (a == 0x0136 || a == 0x0301 || a == 0x0303 ||
++			    a == 0x0305 || a == 0x0306 || a == 0x0309 ||
++			    a == 0x030b || a == 0x0310 || a == 0x0820)
++				pll_seen++;
++		}
++		if (pll_seen)
++			pr_err("CAM-SENSOR-DBG: PLL regs in this opcode=%d count=%u\n",
++				i2c_list->op_code, pll_seen);
++	}
++
+ 	if (i2c_list->op_code == CAM_SENSOR_I2C_WRITE_RANDOM) {
+ 		rc = camera_io_dev_write(io_master_info,
+ 			&(i2c_list->i2c_settings));
+@@ -1479,6 +1498,8 @@ int cam_sensor_apply_settings(struct cam_sensor_ctrl_t *s_ctrl,
+ 		if (i2c_set->is_settings_valid == 1) {
+ 			list_for_each_entry(i2c_list,
+ 				&(i2c_set->list_head), list) {
++				pr_err("CAM-SENSOR-DBG: apply opcode=%d settings valid, count=%u\n",
++					opcode, i2c_list->i2c_settings.size);
+ 				rc = cam_sensor_i2c_modes_util(s_ctrl,
+ 					i2c_list);
+ 				if (rc < 0) {
+diff --git a/src/camera_kt/drivers/cam_sensor_module/cam_sensor_utils/cam_sensor_util.c b/src/camera_kt/drivers/cam_sensor_module/cam_sensor_utils/cam_sensor_util.c
+index c48b59d..13bd17e 100644
+--- a/src/camera_kt/drivers/cam_sensor_module/cam_sensor_utils/cam_sensor_util.c
++++ b/src/camera_kt/drivers/cam_sensor_module/cam_sensor_utils/cam_sensor_util.c
+@@ -1970,6 +1970,8 @@ static int msm_cam_sensor_handle_reg_gpio(int seq_type,
+ 	if (gpio_num_info->valid[gpio_offset] == 1) {
+ 		CAM_DBG(CAM_SENSOR, "VALID GPIO offset: %d, seqtype: %d",
+ 			 gpio_offset, seq_type);
++		pr_err("CAM-SENSOR-DBG: GPIO seq_type=%d val=%d gpio_num=%d\n",
++			seq_type, val, gpio_num_info->gpio_num[gpio_offset]);
+ 		cam_res_mgr_gpio_set_value(
+ 			gpio_num_info->gpio_num
+ 			[gpio_offset], val);

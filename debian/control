@@ -1,4 +1,4 @@
-Source: camx-dkms
+Source: camx-dkms-qcs6490
 Maintainer: "Radxa Computer Co., Ltd" <dev@radxa.com>
 Section: admin
 Priority: standard
@@ -8,13 +8,15 @@ Build-Depends: debhelper-compat (= 13),
                devscripts,
                lintian,
                dh-exec,
+               dh-dkms,
                pandoc,
 
-Package: camx-dkms
+Package: camx-dkms-qcs6490
 Architecture: all
 Section: admin
 Priority: optional
 Depends: ${misc:Depends},
-Description: camx-dkms
- This package provides the camx-dkms.
+Description: DKMS source for Qualcomm CamX camera driver (QCS6490)
+ Builds camera_qcm6490.ko from Qualcomm camera-driver for
+ QCS6490 / QCM6490 platforms such as the Radxa Dragon Q6A.
 

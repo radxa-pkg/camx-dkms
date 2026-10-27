@@ -1,0 +1,6 @@
+PACKAGE_NAME="camx-dkms-qcs6490"
+PACKAGE_VERSION="#MODULE_VERSION#"
+BUILT_MODULE_NAME[0]="camera_qcm6490"
+DEST_MODULE_LOCATION[0]="/kernel/drivers/media/platform/qcom/camera/"
+MAKE[0]="make -C ${kernel_source_dir} M=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build CAMERA_KERNEL_ROOT=${dkms_tree}/${PACKAGE_NAME}/${PACKAGE_VERSION}/build CAMERA_ARCH=qcm6490 modules"
+AUTOINSTALL="YES"

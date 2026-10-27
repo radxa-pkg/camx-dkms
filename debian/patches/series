@@ -1,0 +1,6 @@
+# No patch is enabled: the build must stay pristine (see changelog 1.0.5-5).
+# 0001-q6a-settle-sof.patch           - Q6A fixes from the Yocto recipe; kept for
+#                                      reference.  Applying it stalls IMX577
+#                                      streaming (0 frames) on Q6A/Ubuntu.
+# 0002-csid-clock-floor-400mhz-probe.patch - diagnostic probe (floor only).
+# Details: docs/camx-service-packaging.md section 10.6.

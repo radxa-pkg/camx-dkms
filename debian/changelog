@@ -1,4 +1,4 @@
-camx-dkms (0.1.0-1) UNRELEASED; urgency=medium
+camx-dkms-qcs6490 (1.0.5-1) UNRELEASED; urgency=medium
 
   * Add initial Debian packaging support
 
